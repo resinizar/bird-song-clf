@@ -8,16 +8,21 @@
 from scipy.io import wavfile
 import csv
 from math import floor
+import pandas as pd
+import numpy as np
+import os.path
 
 
 
-def main(datapath, savepath, dur, overlap):
+def main(datapath, dur, overlap):
     datafile = open(datapath, 'r')
-    savefile = open(savepath, 'w')
     rows = csv.reader(datafile)
-    writer = csv.writer(savefile)
 
-    for filepath, tag in rows:
+    new_rows = []
+    new_rows.append(['fp', 'start', 'end', 'tag'])
+    
+    next(rows)  # skip header
+    for filepath, tag in rows: 
         sr, clip = wavfile.read(filepath)
         splice_size = round(dur * sr)
         stride = round((1 - overlap) * splice_size)
@@ -25,32 +30,56 @@ def main(datapath, savepath, dur, overlap):
         if splice_size > len(clip):  # if shorter than duration, need padding
             pass
 
-        else:  # if longer chop it
-            num_chops = floor((1 + overlap) * len(clip) / splice_size)
-            for i in range(num_chops):
-                chop_start = i * stride
+        else:
+            i = 0
+            while True:
+                chop_start = round(i * stride)
                 chop_end = chop_start + splice_size
-                writer.writerow([filepath, tag, chop_start, chop_end])
-
-            writer.writerow([filepath, tag, len(clip) - splice_size, len(clip)])  # add chop at end
-
+                
+                if chop_end > len(clip):
+                    break
+                else:
+                    new_rows.append([filepath, chop_start, chop_end, tag])
+                    i += 1
+                    
+            new_rows.append([filepath, len(clip) - splice_size, len(clip), tag])  # add chop at end
     datafile.close()
-    savefile.close()
+
+    # add 'id' column which is a number corresponding to a tag
+    df = pd.DataFrame(new_rows[1:], columns=new_rows[0])
+    tags = df.tag.unique()
+    ids = np.arange(0, len(tags), 1)
+
+    tag_to_id = pd.DataFrame(list(zip(tags, ids)), columns=['tag', 'id'])
+    tag_to_id.to_csv(os.path.join(os.path.split(datapath)[0], 'tag_to_id.csv'), index=False)
+
+    new_col = df['tag'].apply(lambda x: tag_to_id.loc[tag_to_id['tag'] == x].id.values[0])
+    df['id'] = pd.DataFrame(new_col)
+
+    # once chopping is finished make classes equal
+    g = df.groupby('tag')
+    df = g.apply(lambda x: x.sample(g.size().min()).reset_index(drop=True))
+    df.to_csv(os.path.join(os.path.split(datapath)[0], 'chopped.csv'), index=False)
 
 
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dur', dest='dur', type=float, 
-        help='The time in seconds that each clip should last.')
-    parser.add_argument('--overlap', dest='overlap', type=float,
-        help='The fraction of overlap, e.g. .5 for 50% overlap.')
-    parser.add_argument('--datapath', dest='datapath', type=str,
+
+    parser.add_argument('datapath', type=str,
         help='Full path to the csvfile where the info is.')
-    parser.add_argument('--savepath', dest='savepath', type=str,
-        help='Full path and filename for where to save new csvfile.')
+    parser.add_argument('dur', type=float, 
+        help='The time in seconds that each clip should last.')
+    parser.add_argument('overlap', type=float,
+        help='The fraction of overlap, e.g. .5 for 50%% overlap.')
+    
     args = parser.parse_args()
 
-    main(args.datapath, args.savepath, args.dur, args.overlap)
+    # raise exceptions if given illegal arguments
+    if '.csv' not in args.datapath:
+        raise Exception('datapath must be a csvfile (got {})'.format(args.datapath))
+    if args.overlap > 1 or args.overlap < 0:
+        raise ValueError('overlap must be between 0 and 1 (got {})'.format(args.overlap))
 
+    main(args.datapath, args.dur, args.overlap)
