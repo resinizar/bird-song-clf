@@ -1,155 +1,183 @@
-from torch.utils.data import Dataset, DataLoader
-import torch
-import pandas as pd
+import sys
+import csv
 from os import path
-from scipy.io import wavfile
-from math import inf
-from sklearn.model_selection import train_test_split
-from time import time
-from Trainer import Trainer
-import torch.nn.functional as F
+from copy import deepcopy as cpy
+
+import numpy as np
+import sounddevice as sd
+import torch
+import librosa
+import soundfile as sf
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from train_model import Model
 
 
 
-class AudioBits(Dataset):
-    def __init__(self, annotations):
-        """
-        annotations - str: full filepath to csv file - or pd.DataFrame
-        """
-        super(AudioBits, self).__init__()
-
-        if isinstance(annotations, str):
-            self.df = pd.read_csv(path.join(datafolder, annotations))
-        elif isinstance(annotations, pd.DataFrame):
-            self.df = annotations
-        else:
-            raise Exception('Input to Audiobits must be a path (string) or a pandas.DataFrame')
-
-    def __getitem__(self, ind):
-        fp, start, end, tag = self.df.iloc[ind]
-
-        sr, clip = wavfile.read(fp)
-        bit = clip[start:end]
-        bit = torch.Tensor(bit.reshape((1, -1)))
-        return bit, tag
-
-    def __len__(self):
-        return len(self.df)
+def norm(spec):
+    """
+    spec - 2d numpy array - representation of data in frequency domain
+    return - 2d numpy array - same shape, normalized between 0 and 1
+    """
+    min_num = np.amin(spec)
+    max_num = np.amax(spec)
+    return np.divide(np.add(spec, -min_num), max_num-min_num)
 
 
-class Model(torch.nn.Module):
+def make_pred(model, data):
+    data = torch.Tensor(data)
+    zs = model(data.view(1, 1, -1))
+    _, pred = torch.max(zs, dim=1)
+    return pred.item(), zs.detach().numpy()[0]
 
-    def __init__(self, num_classes):
-        super(Model, self).__init__()
+def get_spec(data):
+    stft = librosa.stft(data, n_fft=1024, hop_length=1024//2+1)
+    rstft, _ = librosa.magphase(stft)
+    spec = librosa.amplitude_to_db(rstft)
+    spec = norm(spec)  # norm between 0 and 1
+    spec = spec[np.where(np.sum(spec, axis=1) > 1)]
+    spec = np.flipud(spec)  # flip so low sounds are on bottom
+    return spec
 
-        self.conv1 = torch.nn.Conv1d(
-            in_channels=1, 
-            out_channels=16,
-            kernel_size=64,
-            stride=4
-            )
 
-        self.conv2 = torch.nn.Conv1d(
-            in_channels=16,
-            out_channels=32,
-            kernel_size=32,
-            stride=4
-            )
+def create_vis(data, preds, chunk_size, fig_h, out_fp, gt_fp=None, wavfile=None):
+    to_stack = []
 
-        self.conv3 = torch.nn.Conv1d(
-            in_channels=32,
-            out_channels=64,  
-            kernel_size=16,
-            stride=4
-            )
+    spec = get_spec(data)
+    to_stack.append(spec)
 
-        self.fc1 = torch.nn.Linear(1216, num_classes)
-        # self.fc2 = torch.nn.Linear(32, num_classes)
+    h, w = spec.shape
+    pred_vis = np.zeros((int(h * .1), w))
+    for i, pred in enumerate(preds):
+        start_spec = int(i * chunk_size / len(data) * w)
+        end_spec = int((i + 1) * chunk_size / len(data) * w)
+        pred_vis[:, start_spec : end_spec] = pred
+    to_stack.append(norm(pred_vis))
 
-    def forward(self, x):
-        f = F.relu(self.conv1(x))
-        # print('after conv1:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
-        # print('after maxpool: ', x.size())
-        f = F.relu(self.conv2(x))
-        # print('after conv2:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
-        # print('after maxpool: ', x.size())
-        f = F.relu(self.conv3(x))
-        # print('after conv3:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
-        # print('after maxpool: ', x.size())
-        x = x.reshape(x.size()[0], -1)
-        # print('after convolutional layers: ', x.size())
-        x = self.fc1(x)
-        # print('after fc1:     ', x.size())
+    if gt_fp:
+        gt_vis = np.zeros((int(h * .1), w))
+        _, fn = path.split(wavfile)
+        df = pd.read_csv(gt_fp)
+        df = df.dropna()
+        df = df[df['fp'].str.contains(fn)]
 
-        # x = self.fc2(x)
-        # print('after fc2:     ', x.size())
+        for index, row in df.iterrows():
+            _, start, end, _, _ = row
+            start_spec = int(start / len(data) * w)
+            end_spec =   int(end /   len(data) * w)
+            gt_vis[:, start_spec : end_spec] = 1
+        to_stack.append(gt_vis)
         
-        return x
-
-
-def strat_test(datafile, b_size, o_type, lr, m):
-    start_time = time()
-
-    # stratified train test split
-    df = pd.read_csv(datafile)
-    num_classes = len(df.tag.unique())
-
-    X, y = df[['fp', 'start', 'end']], df['id']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=.25, stratify=y)
-    train_df = pd.concat([X_train, y_train], axis=1)
-    valid_df = pd.concat([X_test, y_test], axis=1)
-
-    train_data = AudioBits(train_df)
-    valid_data = AudioBits(valid_df)
-
-    train_loader = DataLoader(train_data, batch_size=b_size, shuffle=True, num_workers=4)
-    valid_loader = DataLoader(valid_data, batch_size=b_size, shuffle=True, num_workers=4)
-
-    print('Loaded data in {:.2f} seconds.'.format(time()-start_time))
-
-    net = Model(num_classes)
-
-    if o_type == 'sgd':
-        opt = torch.optim.SGD(net.parameters(), lr, momentum=m)
-    else:
-        opt = torch.optim.Adam(net.parameters(), lr)
-
-    loss_fun = torch.nn.CrossEntropyLoss()
-    sch = None
-    trainer = Trainer(net, train_loader, valid_loader, num_classes, opt, sch, loss_fun, 'cpu')
-    trainer.train(10, 10)
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('datapath', type=str,
-        help='Full path including filename of csvfile.')
-
-    parser.add_argument('-b', dest='b_size', default=2, type=int,
-        help='Specify batch size.')
-    parser.add_argument('-o', dest='opt', default='adam', type=str,
-        help='Specify which optimizer you want to use (sgd | adam).')
-    parser.add_argument('-l', dest='lr', default=1e-4, type=float,
-        help='Specify learning rate.')
-    parser.add_argument('-m', dest='momentum', default=.9, type=float,
-        help='Specify momentum (only used for -o sgd).')
+    img = np.vstack((to_stack))
+    h, w = img.shape
+    fig_w = max(round(fig_h * w / h), 1)
     
+    plt.figure(figsize=(fig_w, fig_h))
+    plt.axis('off')
+    plt.imshow(img, cmap='gray')
+    plt.savefig(out_fp, bbox_inches='tight')
+    
+
+def live_record(model, block_dur, sr, fig_height, out_fp):
+    data = []
+    preds = []
+    chunk_size = round(block_dur * sr)
+
+    def callback(indata, frames, time, status):
+        if status:
+            print(status)
+        if any(indata):
+            data.append(cpy(indata))
+            pred, zs = make_pred(model, indata)
+            preds.append(zs[0])
+            print('z: {}\t{}'.format(zs, pred))
+
+        else:
+            print('no input')
+
+    try:
+        with sd.InputStream(device=0, channels=1, callback=callback, blocksize=chunk_size, samplerate=sr, dtype='int16'):
+            print('press control C to stop recording')
+            while True:
+                response = input()
+
+    except KeyboardInterrupt:
+        create_vis(np.array(data).reshape(-1), preds, chunk_size, fig_height, out_fp)
+
+        fn, ext = path.splitext(out_fp)
+        wav_save  = fn + '.wav'
+        sf.write(wav_save, np.array(data).reshape(-1), sr)
+        sys.exit()
+
+    except Exception as e:
+        print(type(e).__name__ + ': ' + str(e))
+        sys.exit()
+
+
+def use_wavfile(model, wavfile, gt_fp, block_dur, sr, fig_height, out_fp):
+    data, read_sr = sf.read(wavfile, dtype='int16')
+    data = data.astype(np.float32)
+    assert sr == read_sr
+    preds = []
+    chunk_size = round(block_dur * sr)
+
+    for i in range(0, len(data), chunk_size):
+        block = data[i : i + chunk_size]
+        if len(block) == chunk_size:
+            pred, zs = make_pred(model, block)
+            preds.append(pred)
+
+    create_vis(data, preds, chunk_size, fig_height, out_fp, gt_fp, wavfile)
+
+
+def use_gt(model, gt_fp, inds, block_dur, sr, fig_height, out_fp):
+    df = pd.read_csv(gt_fp)
+    df = df.dropna()
+
+    wavs = df['fp'].unique()
+
+    if len(inds) == 0:
+        inds = [0, len(wavs)]
+
+    for i, wav in enumerate(wavs[inds[0]:inds[1]]):
+        print('Starting wav file, ', wav)
+        fn, ext = path.splitext(out_fp)
+        new_out_fp = '{}_{}{}'.format(fn, i, ext)
+        print('Save name is: ', new_out_fp)
+        use_wavfile(model, wav, gt_fp, block_dur, sr, fig_height, new_out_fp)
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('model', type=str,
+        help='file path to model to load')
+    parser.add_argument('-w', '--wavfile', dest='wavfile', type=str,
+        help='file path to wavfile to load')
+    parser.add_argument('-g', '--ground-truth', dest='gt', type=str,
+        help='file path to csv with gt')
+    parser.add_argument('-i', '--inds', dest='inds', default=[], nargs='+', type=int,
+        help='start and end index for gt files to use')
+    parser.add_argument('-b', '--block-dur', dest='block_dur', type=float, default=1.,
+        help='duration in seconds to give net at a time')
+    parser.add_argument('-s', '--sr', dest='sr', type=int, default=16000,
+        help='sampling rate to load file at')
+    parser.add_argument('-f', '--fig-height', dest='fig_height', type=int, default=2,
+        help='sampling rate to load file at')
+    parser.add_argument('-o', '--output', dest='out_fp', type=str, default='./results/test.png',
+        help='filepath of visualization (saved by matplotlib)')
+
     args = parser.parse_args()
 
-    # raise exceptions if given illegal arguments
-    if '.csv' not in args.datapath:
-        raise Exception('datapath must be a csvfile (got {})'.format(args.datapath))
-    if not (args.opt == 'adam' or args.opt == 'sgd'):
-        raise Exception('optimizer must be \'adam\' or \'sgd\' (got {})'.format(args.opt))
-    if args.momentum < 0 or args.momentum > 1:
-        raise ValueError('momentum must be between 0 and 1 (got {})'.format(args.momentum))
-    if args.lr < 0 or args.lr > 1:
-        raise ValueError('learning rate must be between 0 and 1 (got {})'.format(args.lr))
+    model = Model(2)
+    model.load_state_dict(torch.load(args.model, map_location='cpu'))
+    model.eval()
 
-    strat_test(args.datapath, args.b_size, args.opt, args.lr, args.momentum)
-
+    if args.gt and args.wavfile:
+        use_wavfile(model, args.wavfile, args.gt, args.block_dur, args.sr, args.fig_height, args.out_fp)
+    elif args.gt and not args.wavfile:
+        use_gt(model, args.gt, args.inds, args.block_dur, args.sr, args.fig_height, args.out_fp)
+    else:
+        live_record(model, args.block_dur, args.sr, args.fig_height, args.out_fp)

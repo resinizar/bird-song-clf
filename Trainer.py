@@ -1,8 +1,16 @@
+##################################################################################
+#    Gabriel Cano                                                                #
+##################################################################################
+#    Class that handles training and testing for a pytorch net.                  #
+#                                                                                #
+#                                                                                #
+##################################################################################
 import torch
 import matplotlib.pyplot as plt
 from copy import deepcopy as cpy
 from time import time
 import os
+import numpy as np
 
 
 
@@ -46,8 +54,8 @@ class Trainer:
         plt.plot(list(range(len(self.vs_loss))), self.vs_loss, '#85c1a8')
         plt.xlabel('# epochs')
         plt.ylabel('loss')
-#         plt.savefig('./graphs/loss.png'.format(), dpi=300)
-        plt.show()
+        plt.savefig('./graphs/loss.png'.format(), dpi=300)
+        # plt.show()
         plt.clf()
         
     def class_accuracy(self, data):
@@ -84,18 +92,26 @@ class Trainer:
             if self.sch:
                 self.sch.step()
 
+            # preds = []  # delete
+
             running_loss = 0.
             for i, (xs, ts) in enumerate(self.tr_data):
                 xs, ts = xs.to(self.device), ts.to(self.device)
                 self.opt.zero_grad()
                 zs = self.net(xs)
                 loss = self.loss_fun(zs, ts)
+
+                # _, pred = torch.max(zs, dim=1)  # delete
+                # preds.extend(pred.cpu().detach().numpy())  # delete
+
                 loss.backward()
                 self.opt.step()
                 running_loss += loss.item()/len(xs)
             curr_tr_loss = round(running_loss/(i+1), 4)
             curr_tr_acc = round(self.test_accuracy(self.tr_data, self.net), 4)
             self.tr_loss.append(curr_tr_loss) 
+
+            # print('% of 1s predicted: ', round(np.sum(preds) / len(preds), 3))
 
             self.net.eval()
             running_loss = 0.
@@ -124,23 +140,26 @@ class Trainer:
                 break  
         print('Finished Training')
 
-    def save_checkpoint():
+    def save_checkpoint(self, fp=None):
         state = {'epoch': self.epoch_num, 
         'best_net': self.best_net.state_dict(),
         'curr_net': self.net.state_dict(), 
         'opt': self.opt.state_dict()
         }
 
-        highest = -1
-        for filename in os.listdir('./checkpoints'):
-            if '.pth.tar' in filename:
-                ind = int(filename.split('.')[0].split('-')[-1])
-                if ind > highest:
-                    highest = cpy(ind)
+        if fp is None:
+            highest = -1
+            for filename in os.listdir('./checkpoints'):
+                if '.pth.tar' in filename:
+                    ind = int(filename.split('.')[0].split('-')[-1])
+                    if ind > highest:
+                        highest = cpy(ind)
 
-        torch.save(state, 'checkpoint-{}.pth.tar'.format(highest + 1))
+            torch.save(state, 'checkpoint-{}.pth.tar'.format(highest + 1))
+        else:
+            torch.save(state, fp)
 
-    def load_checkpoint(filename=None):
+    def load_checkpoint(self, filename=None):
         if not filename:
             filename = os.listdir('./checkpoints')[-1]
         checkpoint = torch.load(filename)
@@ -148,6 +167,3 @@ class Trainer:
         self.best_net.load_state_dict(checkpoint['best_net'])
         self.opt.load_state_dict(checkpoint['opt'])
         self.epoch_num = checkpoint['epoch_num']
-
-
-
