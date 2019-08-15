@@ -1,30 +1,27 @@
-from torch.utils.data import Dataset, DataLoader
-import torch
-import pandas as pd
+
 from os import path
 from math import inf
+from time import time
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
 import soundfile as sf
 from sklearn.model_selection import train_test_split
-from time import time
-from Trainer import Trainer
-import torch.nn.functional as F
 import numpy as np
+
+from Trainer import Trainer
 
 
 
 class AudioBits(Dataset):
     def __init__(self, annotations):
         """
-        annotations - str: full filepath to csv file - or pd.DataFrame
+        annotations - pd.DataFrame
         """
         super(AudioBits, self).__init__()
-
-        if isinstance(annotations, str):
-            self.df = pd.read_csv(path.join(datafolder, annotations))
-        elif isinstance(annotations, pd.DataFrame):
-            self.df = annotations
-        else:
-            raise Exception('Input to Audiobits must be a path (string) or a pandas.DataFrame')
+        self.df = annotations
 
     def __getitem__(self, ind):
         fp, start, end, tag = self.df.iloc[ind]  # the fourth value is a number now
@@ -84,7 +81,8 @@ class Model(torch.nn.Module):
         # self.fc1 = torch.nn.Linear(1856, 1856 * 2)
         # self.fc2 = torch.nn.Linear(1856 * 2, 2)
 
-        self.fc1 = torch.nn.Linear(832, num_classes)
+        self.fc1 = torch.nn.Linear(832, num_classes)  # for .5 second stride 2
+        # self.fc1 = torch.nn.Linear(1856, num_classes)  # for 1 second stride 2
 
     def forward(self, x):
         f = F.relu(self.conv1(x))
@@ -157,7 +155,7 @@ if __name__ == "__main__":
     parser.add_argument('datapath', type=str,
         help='Full path including filename of csvfile.')
 
-    parser.add_argument('-b', dest='b_size', default=4, type=int,
+    parser.add_argument('-b', dest='b_size', default=16, type=int,
         help='batch size.')
     parser.add_argument('-o', dest='opt', default='adam', type=str,
         help='optimizer you want to use (sgd | adam)')

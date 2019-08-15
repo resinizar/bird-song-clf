@@ -5,11 +5,15 @@
 #                                                                                #
 #                                                                                #
 ##################################################################################
-import torch
-import matplotlib.pyplot as plt
+import os
+import sys
+import signal
 from copy import deepcopy as cpy
 from time import time
-import os
+
+import torch
+import matplotlib.pyplot as plt
+
 import numpy as np
 
 
@@ -28,6 +32,17 @@ class Trainer:
         self.device = device
         self.best_net = net
         self.epoch_num = 0
+
+        def cancel_handler(sig, frame):
+            print('Saving model...')
+            try:
+                torch.save(self.best_net.state_dict(), 'model.pth')
+                self.graph_loss()
+            except RuntimeError:
+                pass
+            print('Successful save.')
+            sys.exit(0)
+        signal.signal(signal.SIGINT, cancel_handler)
 
     def make_predictions(self, ts_data, net):
         net.eval()
@@ -54,7 +69,7 @@ class Trainer:
         plt.plot(list(range(len(self.vs_loss))), self.vs_loss, '#85c1a8')
         plt.xlabel('# epochs')
         plt.ylabel('loss')
-        plt.savefig('./graphs/loss.png'.format(), dpi=300)
+        plt.savefig('loss.png'.format(), dpi=300)
         # plt.show()
         plt.clf()
         

@@ -2,6 +2,7 @@ import sys
 import csv
 from os import path
 from copy import deepcopy as cpy
+from math import ceil
 
 import numpy as np
 import sounddevice as sd
@@ -10,9 +11,12 @@ import librosa
 import soundfile as sf
 import matplotlib.pyplot as plt
 import pandas as pd
+from tinytag import TinyTag
 
 from train_model import Model
 
+FALSE_POS = 1
+FALSE_NEG = -1
 
 
 def norm(spec):
@@ -31,6 +35,7 @@ def make_pred(model, data):
     _, pred = torch.max(zs, dim=1)
     return pred.item(), zs.detach().numpy()[0]
 
+
 def get_spec(data):
     stft = librosa.stft(data, n_fft=1024, hop_length=1024//2+1)
     rstft, _ = librosa.magphase(stft)
@@ -41,7 +46,72 @@ def get_spec(data):
     return spec
 
 
-def create_vis(data, preds, chunk_size, fig_h, out_fp, gt_fp=None, wavfile=None):
+def metadata(fp):
+    """
+    Parses the comment provided in recordings by audio moth.
+    fp - str - full file path
+    returns - a dictionary of the provided information
+    """
+    comment = TinyTag.get(fp).comment
+
+    if comment:
+        split_up = comment.split(' ')
+        time = split_up[2]
+        date = split_up[3]
+        timezone = split_up[4]
+        am_id = split_up[7]
+        gain_setting = split_up[11]
+        battery_level = split_up[16]
+
+        return {
+            'time': time,
+            'date': date,
+            'timezone': timezone,
+            'id': am_id,
+            'gain': gain_setting,
+            'battery': battery_level
+        }
+    else:   # HACK FIX
+        return {
+            'time': '',
+            'date': '',
+            'timezone': '',
+            'id': '',
+            'gain': '',
+            'battery': ''
+        }
+
+
+def score(pred, gt, chunk_size):
+    diff = np.subtract(pred, gt)
+
+    counts = {
+        FALSE_POS: 0,
+        FALSE_NEG: 0,
+    }
+
+    contig = 1
+    prev = diff[0]
+    for curr in diff[1:]:
+        if curr == prev:
+            contig += 1
+        else:
+            if contig >= chunk_size:
+                if prev != 0:
+                    counts[prev] += contig
+            contig = 1
+        prev = cpy(curr)
+    if contig >= chunk_size:
+        if prev != 0:
+            counts[prev] += contig
+
+    return {
+        'false pos': round(counts[FALSE_POS] / len(diff) * 100, 1),
+        'false neg': round(counts[FALSE_NEG] / len(diff) * 100, 1)
+    }
+
+
+def create_vis(data, preds, chunk_size, gt_df=None):
     to_stack = []
 
     spec = get_spec(data)
@@ -55,31 +125,30 @@ def create_vis(data, preds, chunk_size, fig_h, out_fp, gt_fp=None, wavfile=None)
         pred_vis[:, start_spec : end_spec] = pred
     to_stack.append(norm(pred_vis))
 
-    if gt_fp:
+    if gt_df is not None:
         gt_vis = np.zeros((int(h * .1), w))
-        _, fn = path.split(wavfile)
-        df = pd.read_csv(gt_fp)
-        df = df.dropna()
-        df = df[df['fp'].str.contains(fn)]
 
-        for index, row in df.iterrows():
+        for index, row in gt_df.iterrows():
             _, start, end, _, _ = row
             start_spec = int(start / len(data) * w)
             end_spec =   int(end /   len(data) * w)
             gt_vis[:, start_spec : end_spec] = 1
         to_stack.append(gt_vis)
         
-    img = np.vstack((to_stack))
+    return np.vstack((to_stack)), score(pred_vis[0], gt_vis[0], chunk_size * w / len(data))
+
+
+def save_vis(img, score, fig_h):
     h, w = img.shape
     fig_w = max(round(fig_h * w / h), 1)
-    
     plt.figure(figsize=(fig_w, fig_h))
     plt.axis('off')
+    plt.set_title(score, fontsize=20)
     plt.imshow(img, cmap='gray')
     plt.savefig(out_fp, bbox_inches='tight')
     
 
-def live_record(model, block_dur, sr, fig_height, out_fp):
+def live_record(model, block_dur, sr, fig_h, out_fp):
     data = []
     preds = []
     chunk_size = round(block_dur * sr)
@@ -103,8 +172,10 @@ def live_record(model, block_dur, sr, fig_height, out_fp):
                 response = input()
 
     except KeyboardInterrupt:
-        create_vis(np.array(data).reshape(-1), preds, chunk_size, fig_height, out_fp)
+        img, score = create_vis(np.array(data).reshape(-1), preds, chunk_size)
+        save_vis(img, score, fig_h)
 
+        # save wav file 
         fn, ext = path.splitext(out_fp)
         wav_save  = fn + '.wav'
         sf.write(wav_save, np.array(data).reshape(-1), sr)
@@ -115,37 +186,45 @@ def live_record(model, block_dur, sr, fig_height, out_fp):
         sys.exit()
 
 
-def use_wavfile(model, wavfile, gt_fp, block_dur, sr, fig_height, out_fp):
-    data, read_sr = sf.read(wavfile, dtype='int16')
+def use_wavfile(model, wav_fp, gt_df, block_dur, sr):
+    data, read_sr = sf.read(wav_fp, dtype='int16')
     data = data.astype(np.float32)
     assert sr == read_sr
+
     preds = []
     chunk_size = round(block_dur * sr)
-
     for i in range(0, len(data), chunk_size):
         block = data[i : i + chunk_size]
         if len(block) == chunk_size:
             pred, zs = make_pred(model, block)
             preds.append(pred)
 
-    create_vis(data, preds, chunk_size, fig_height, out_fp, gt_fp, wavfile)
+    _, fn = path.split(wav_fp)
+    df = gt_df[gt_df['fp'].str.contains(fn)]
+
+    return create_vis(data, preds, chunk_size, df)
 
 
-def use_gt(model, gt_fp, inds, block_dur, sr, fig_height, out_fp):
-    df = pd.read_csv(gt_fp)
-    df = df.dropna()
+def use_gt(model, gt_fp, num, block_dur, sr, fig_height, out_fp):
+    gt_df = pd.read_csv(gt_fp)
+    gt_df = gt_df.dropna()
 
-    wavs = df['fp'].unique()
+    if not num:
+        fps = gt_df.fp.unique()
+    else:
+        fps = np.random.choice(gt_df.fp.unique(), num)
 
-    if len(inds) == 0:
-        inds = [0, len(wavs)]
-
-    for i, wav in enumerate(wavs[inds[0]:inds[1]]):
-        print('Starting wav file, ', wav)
-        fn, ext = path.splitext(out_fp)
-        new_out_fp = '{}_{}{}'.format(fn, i, ext)
-        print('Save name is: ', new_out_fp)
-        use_wavfile(model, wav, gt_fp, block_dur, sr, fig_height, new_out_fp)
+    f, axarray = plt.subplots(ncols=2, nrows=ceil(len(fps)/2))
+    f.set_size_inches(10*fig_height, len(fps)*fig_height)
+    f.tight_layout()
+    for fp, ax in zip(fps, axarray.ravel()):
+        img, score = use_wavfile(model, fp, gt_df, block_dur, sr)
+        info = metadata(fp)
+        ax.axis('off')
+        ax.set_title('{} {} {} {} {}'.format(
+            path.split(fp)[1], info['time'], info['timezone'], info['date'], score), fontsize=20)
+        ax.imshow(img, cmap='gray')
+    plt.savefig(out_fp, bbox_inches='tight')
 
 
 if __name__ == '__main__':
@@ -158,13 +237,13 @@ if __name__ == '__main__':
         help='file path to wavfile to load')
     parser.add_argument('-g', '--ground-truth', dest='gt', type=str,
         help='file path to csv with gt')
-    parser.add_argument('-i', '--inds', dest='inds', default=[], nargs='+', type=int,
-        help='start and end index for gt files to use')
+    parser.add_argument('-r', '--num-rand', dest='rand', default=None, type=int,
+        help='number of random files to select from ground truth csv, if not given does all')
     parser.add_argument('-b', '--block-dur', dest='block_dur', type=float, default=1.,
         help='duration in seconds to give net at a time')
     parser.add_argument('-s', '--sr', dest='sr', type=int, default=16000,
         help='sampling rate to load file at')
-    parser.add_argument('-f', '--fig-height', dest='fig_height', type=int, default=2,
+    parser.add_argument('-f', '--fig-height', dest='fig_height', type=int, default=3,
         help='sampling rate to load file at')
     parser.add_argument('-o', '--output', dest='out_fp', type=str, default='./results/test.png',
         help='filepath of visualization (saved by matplotlib)')
@@ -176,8 +255,9 @@ if __name__ == '__main__':
     model.eval()
 
     if args.gt and args.wavfile:
-        use_wavfile(model, args.wavfile, args.gt, args.block_dur, args.sr, args.fig_height, args.out_fp)
+        img = use_wavfile(model, args.wavfile, args.gt, args.block_dur, args.sr, args.fig_height, args.out_fp)
+        save_vis(img, score, args.fig_height)
     elif args.gt and not args.wavfile:
-        use_gt(model, args.gt, args.inds, args.block_dur, args.sr, args.fig_height, args.out_fp)
+        use_gt(model, args.gt, args.rand, args.block_dur, args.sr, args.fig_height, args.out_fp)
     else:
         live_record(model, args.block_dur, args.sr, args.fig_height, args.out_fp)
