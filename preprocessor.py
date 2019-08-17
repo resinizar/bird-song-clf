@@ -13,6 +13,8 @@ import numpy as np
 import os.path
 import pandas as pd
 from random import randint
+from os import path
+import yaml
 
 
 def chop(clip, displacement, splice_size, stride, fp, tag):
@@ -61,15 +63,17 @@ def main(df, sr, dur, overlap, out_fp):
             curr_clip_ind = e_ind
         rows.extend(chop(clip[curr_clip_ind:], curr_clip_ind, splice_size, stride, fp, 'bg'))
 
-
     df = pd.DataFrame(rows[1:], columns=rows[0])
-    tags = ['bg', 'cotr']
-    ids = [0, 1]
-    tag_to_id = pd.DataFrame(list(zip(tags, ids)), columns=['tag', 'id'])
-    new_col = df['tag'].apply(lambda x: tag_to_id.loc[tag_to_id['tag'] == x].id.values[0])
-    df['id'] = pd.DataFrame(new_col)
     df.to_csv(os.path.join(out_fp), index=False)
 
+    # save metadata
+    d = {
+        'sr': sr,
+        'dur': dur,
+        'overlap': overlap
+    }
+    with open(path.splitext(out_fp)[0] + '.yaml', 'w') as file:
+        yaml.dump(d, file)
 
 if __name__ == '__main__':
     import argparse
