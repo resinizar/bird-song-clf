@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from tinytag import TinyTag
 from PIL import Image
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QWidget, QHBoxLayout, QSizePolicy
+from PyQt5.QtGui import QPixmap
+from PyQt5 import QtCore
 
 from train_model import Model, PretrainedModel, transformation
 
@@ -138,16 +141,17 @@ def create_vis(data, preds, chunk_size, gt_df=None):
             end_spec =   int(end /   len(data) * w)
             gt_vis[:, start_spec : end_spec] = 1
         to_stack.append(gt_vis)
-        
-    return np.vstack((to_stack)), score(pred_vis[0], gt_vis[0], chunk_size * w / len(data))
+        return np.vstack((to_stack)), score(pred_vis[0], gt_vis[0], chunk_size * w / len(data))
+    else:
+        return np.vstack((to_stack)), ''
 
 
-def save_vis(img, score, fig_h):
+def save_vis(img, score, fig_h, out_fp):
     h, w = img.shape
     fig_w = max(round(fig_h * w / h), 1)
-    plt.figure(figsize=(fig_w, fig_h))
+    f = plt.figure(figsize=(fig_w, fig_h))
     plt.axis('off')
-    plt.set_title(score, fontsize=20)
+    f.suptitle(score, fontsize=20)
     plt.imshow(img, cmap='gray')
     plt.savefig(out_fp, bbox_inches='tight')
 
@@ -163,10 +167,53 @@ def make_pred(model, data, use_img):
 
     _, pred = torch.max(zs, dim=1)
     return pred.item(), zs.detach().numpy()[0]
+
+
+class ImgViewer(QLabel):
+    def __init__(self, parent):
+        super().__init__(parent=parent)
+        self.show_bird = False
+
+    def paintEvent(self, e):
+        super(ImgViewer, self).paintEvent(e)
+        if self.show_bird:
+            self.setPixmap(QPixmap('bird.jpg'))
+        else:
+            self.setPixmap(QPixmap())
+
+    def signaled(self, show_bird):
+        self.show_bird = show_bird
+        self.update()
+
+
+class Display(QMainWindow):
+    def __init__(self):
+        QMainWindow.__init__(self)
+        self.resize(800, 600)
+        self.centralwidget = QWidget(self)
+        self.horizontalLayout = QHBoxLayout(self.centralwidget)
+        self.viewer = ImgViewer(self.centralwidget)
+        sizePolicy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.viewer.sizePolicy().hasHeightForWidth())
+        self.viewer.setSizePolicy(sizePolicy)
+        self.viewer.setAlignment(QtCore.Qt.AlignCenter)
+        self.horizontalLayout.addWidget(self.viewer)
+        self.setCentralWidget(self.centralwidget)
     
 
-def live_record(model, use_img, block_dur, sr, fig_h, out_fp):
-    data = []
+def set_up_live_record(model, use_img, block_dur, sr, fig_h, out_fp):
+    app = QApplication([])
+    window = Display()
+    window.show()
+    live_record(model, use_img, block_dur, sr, fig_h, out_fp, window.viewer)
+    del window
+    sys.exit(sys.EX_OK)
+
+
+def live_record(model, use_img, block_dur, sr, fig_h, out_fp, display):
+    # data = []
     preds = []
     chunk_size = round(block_dur * sr)
 
@@ -174,28 +221,31 @@ def live_record(model, use_img, block_dur, sr, fig_h, out_fp):
         if status:
             print(status)
         if any(indata):
-            data.append(cpy(indata))
+            # data.append(cpy(indata))
             pred, zs = make_pred(model, indata, use_img)
-            preds.append(zs[0])
+            preds.append(pred)
             print('z: {}\t{}'.format(zs, pred))
+            display.signaled(pred)
 
         else:
             print('no input')
 
     try:
+
         with sd.InputStream(device=0, channels=1, callback=callback, blocksize=chunk_size, samplerate=sr, dtype='int16'):
             print('press control C to stop recording')
             while True:
                 response = input()
 
     except KeyboardInterrupt:
-        img, score = create_vis(np.array(data).reshape(-1), preds, chunk_size)
-        save_vis(img, score, fig_h)
+        # data = np.array(data).astype(np.float32)
+        # img, score = create_vis(data.reshape(-1), preds, chunk_size)
+        # save_vis(img, score, fig_h, out_fp)
 
-        # save wav file 
-        fn, ext = path.splitext(out_fp)
-        wav_save  = fn + '.wav'
-        sf.write(wav_save, np.array(data).reshape(-1), sr)
+        # # save wav file 
+        # fn, ext = path.splitext(out_fp)
+        # wav_save  = fn + '.wav'
+        # sf.write(wav_save, np.array(data).reshape(-1), sr)
         sys.exit()
 
     except Exception as e:
@@ -284,8 +334,8 @@ if __name__ == '__main__':
 
     if args.gt and args.wavfile:
         img = use_wavfile(model, args.use_img, args.wavfile, args.gt, args.block_dur, args.sr, args.fig_height, args.out_fp)
-        save_vis(img, score, args.fig_height)
+        save_vis(img, score, args.fig_height, args.out_fp)
     elif args.gt and not args.wavfile:
         use_gt(model, args.use_img, args.gt, args.rand, args.block_dur, args.sr, args.fig_height, args.out_fp)
     else:
-        live_record(model, args.use_img, args.block_dur, args.sr, args.fig_height, args.out_fp)
+        set_up_live_record(model, args.use_img, args.block_dur, args.sr, args.fig_height, args.out_fp)
