@@ -1,4 +1,3 @@
-
 from os import path
 from math import inf
 from time import time
@@ -12,6 +11,8 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 import torchvision
 from torchvision import transforms
+import librosa
+from PIL import Image
 
 from Trainer import Trainer
 
@@ -96,68 +97,66 @@ class Model(torch.nn.Module):
             in_channels=1, 
             out_channels=16,
             kernel_size=64,
-            stride=4
+            stride=2
         )
 
         self.conv2 = torch.nn.Conv1d(
             in_channels=16,
             out_channels=32,
             kernel_size=32,
-            stride=4
+            stride=2
         )
 
         self.conv3 = torch.nn.Conv1d(
             in_channels=32,
             out_channels=64,  
             kernel_size=16,
-            stride=4
+            stride=2
         )
 
         # self.conv4 = torch.nn.Conv1d(
         #     in_channels=64,
         #     out_channels=128,  
         #     kernel_size=8,
-        #     stride=4
+        #     stride=2
         # )
 
         # self.conv5 = torch.nn.Conv1d(
-        #     in_channels=32,
-        #     out_channels=64,  
-        #     kernel_size=16,
-        #     stride=4
+        #     in_channels=128,
+        #     out_channels=256,  
+        #     kernel_size=8,
+        #     stride=2
         # )
 
-        # if stride 2 all way through 7552 at end
-        # if stride 4 all way through 384 at end
-
-        # self.fc1 = torch.nn.Linear(1856, 1856 * 2)
-        # self.fc2 = torch.nn.Linear(1856 * 2, 2)
-
-        self.fc1 = torch.nn.Linear(832, num_classes)  # for .5 second stride 2
-        # self.fc1 = torch.nn.Linear(1856, num_classes)  # for 1 second stride 2
+        self.fc1 = torch.nn.Linear(928, 128)  # for .5 second stride 2
+        self.fc2 = torch.nn.Linear(128, 2)
 
     def forward(self, x):
         f = F.relu(self.conv1(x))
         # print('after conv1:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
+        x = F.max_pool1d(f, kernel_size=8, stride=8)
         # print('after maxpool: ', x.size())
         f = F.relu(self.conv2(x))
         # print('after conv2:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
+        x = F.max_pool1d(f, kernel_size=8, stride=8)
         # print('after maxpool: ', x.size())
         f = F.relu(self.conv3(x))
         # print('after conv3:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
+        # x = F.max_pool1d(f, kernel_size=2, stride=2)
         # print('after maxpool: ', x.size())
         # f = F.relu(self.conv4(x))
         # print('after conv4:   ', f.size())
-        x = F.max_pool1d(f, kernel_size=2, stride=2)
+        # x = F.max_pool1d(f, kernel_size=2, stride=2)
+        # print('after maxpool: ', x.size())
+        # f = F.relu(self.conv5(x))
+        # print('after conv5:   ', f.size())
+        # x = F.max_pool1d(f, kernel_size=2, stride=2)
         # print('after maxpool: ', x.size())
         x = x.reshape(x.size()[0], -1)
         # print('after convolutional layers: ', x.size())
-        # x = F.relu(self.fc1(x))
-        # x = self.fc2(x)
-        x = self.fc1(x)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        # x = self.fc1(x)
         return x
 
 
@@ -169,8 +168,8 @@ def strat_test(df, use_imgs, b_size, o_type, lr, m, num_e):
     if 'bg' in tags: 
         tags = np.roll(tags, -1 * tags.index('bg'))
     ids = list(range(len(tags)))
-    tag_to_id = pd.DataFrame(list(zip(tags, ids)), columns=['tag', 'id'])
-    new_col = df['tag'].apply(lambda x: tag_to_id.loc[tag_to_id['tag'] == x].id.values[0])
+    tag_to_id = dict(zip(tags, ids))
+    new_col = df['tag'].apply(lambda t: tag_to_id[t])
     df['id'] = pd.DataFrame(new_col)
 
     # stratified train test split  
@@ -181,8 +180,8 @@ def strat_test(df, use_imgs, b_size, o_type, lr, m, num_e):
 
     # get data loaders
     if use_imgs:
-        train_data = Spec(train_df, trans)
-        valid_data = Spec(valid_df, trans)
+        train_data = Spec(train_df, transformation)
+        valid_data = Spec(valid_df, transformation)
     else:
         train_data = AudioBits(train_df)
         valid_data = AudioBits(valid_df)
@@ -203,13 +202,13 @@ def strat_test(df, use_imgs, b_size, o_type, lr, m, num_e):
         opt = torch.optim.Adam(net.parameters(), lr)
 
     wts = pd.DataFrame(df['id'].value_counts().sort_index()).id.apply(lambda x: 1/x).values
-    loss_fun = torch.nn.CrossEntropyLoss(torch.Tensor(wts).to('cuda:0'))
+    loss_fun = torch.nn.CrossEntropyLoss(torch.Tensor(wts).to('cpu'))
 
     sch = None
-    trainer = Trainer(net, train_loader, valid_loader, len(tags), opt, sch, loss_fun, 'cuda:0')
+    trainer = Trainer(net, train_loader, valid_loader, len(tags), opt, sch, loss_fun, 'cpu')
     trainer.train(num_e, num_e)
     trainer.graph_loss()
-    torch.save(trainer.best_net.state_dict(), 'model2.pth')
+    torch.save(trainer.best_net.state_dict(), 'img_model.pth')
 
 
 if __name__ == "__main__":
