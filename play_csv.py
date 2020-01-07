@@ -2,18 +2,41 @@ import sounddevice as sd
 import soundfile as sf 
 import pandas as pd 
 from time import sleep
+import librosa
+import numpy as np
+import matplotlib.pyplot as plt
+
+def norm(spec):
+    min_num = np.amin(spec)
+    max_num = np.amax(spec)
+    return np.divide(np.add(spec, -min_num), max_num-min_num)
+
+def get_spec(data):
+    stft = librosa.stft(data, n_fft=512, hop_length=512//2+1)  # TODO: how do I pick this number?
+    rstft, _ = librosa.magphase(stft)
+    spec = librosa.amplitude_to_db(rstft)
+    return (norm(spec) * 255).astype('uint8')
 
 
 def main(df):
     for i, row in df.iterrows():
         print(row)
-        fp, start, end, sr, tag = row
-        data, sr = sf.read(fp, start=int(start), stop=int(end))
+        fp, tag, start, end, sr = row
+        pad = .2 * sr
+        data, sr = sf.read(fp, start=int(start - pad), stop=int(end + pad))
         dur_in_sec = len(data) / sr
         print('dur: ', dur_in_sec)
         print()
         sd.play(data, sr)
-        sleep(dur_in_sec)
+        # sleep(dur_in_sec)
+        savename = input('Save as:')
+        if savename != '':
+            sf.write('{}.wav'.format(savename), data, sr)
+            plt.axis('off')
+            plt.imshow(get_spec(data), cmap='magma')
+            plt.savefig('{}.png'.format(savename))
+
+
 
 
 if __name__ == '__main__':
